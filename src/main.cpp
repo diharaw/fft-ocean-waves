@@ -14,7 +14,8 @@
 #undef min
 #define CAMERA_FAR_PLANE 1000.0f
 #define DEBUG_CAMERA_FAR_PLANE 10000.0f
-#define DISPLACEMENT_MAP_SIZE 1024
+#define DISPLACEMENT_MAP_SIZE 256
+#define COMPUTE_LOCAL_WORK_GROUP_SIZE 32
 
 struct GlobalUniforms
 {
@@ -40,7 +41,8 @@ protected:
 
         // Create camera.
         create_camera();
-
+        tilde_h0_k();
+        
         return true;
     }
 
@@ -58,8 +60,8 @@ protected:
         update_uniforms();
 
         m_debug_draw.aabb(glm::vec3(10.0f), glm::vec3(-10.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-
-        render_visualization_quad(m_noise0);
+        
+        render_visualization_quad(m_tilde_h0_k);
 
         m_debug_draw.render(nullptr, m_width, m_height, m_global_uniforms.view_proj, m_main_camera->m_position);
     }
@@ -165,6 +167,15 @@ private:
         if (m_visualize_image_program->set_uniform("s_Image", 0))
             texture->bind(0);
 
+        if (texture->format() == GL_RED)
+            m_visualize_image_program->set_uniform("u_NumChannels", 1);
+        else if (texture->format() == GL_RG)
+            m_visualize_image_program->set_uniform("u_NumChannels", 2);
+        else if (texture->format() == GL_RGB)
+            m_visualize_image_program->set_uniform("u_NumChannels", 3);
+        else if (texture->format() == GL_RGBA)
+            m_visualize_image_program->set_uniform("u_NumChannels", 4);
+
         // Render fullscreen triangle
         glDrawArrays(GL_TRIANGLES, 0, 3);
 
@@ -175,13 +186,78 @@ private:
 
     // -----------------------------------------------------------------------------------------------------------------------------------
 
+    void tilde_h0_k()
+    {
+        m_wind_direction = glm::normalize(m_wind_direction);
+
+        m_tilde_h0_k_program->use();
+
+        if (m_tilde_h0_k_program->set_uniform("noise0", 2))
+            m_noise0->bind(2);
+        if (m_tilde_h0_k_program->set_uniform("noise1", 3))
+            m_noise1->bind(3);
+        if (m_tilde_h0_k_program->set_uniform("noise2", 4))
+            m_noise2->bind(4);
+        if (m_tilde_h0_k_program->set_uniform("noise3", 5))
+            m_noise3->bind(5);
+
+        m_tilde_h0_k_program->set_uniform("u_Amplitude", m_amplitude);
+        m_tilde_h0_k_program->set_uniform("u_WindSpeed", m_wind_speed);
+        m_tilde_h0_k_program->set_uniform("u_WindDirection", m_wind_direction);
+        m_tilde_h0_k_program->set_uniform("u_SuppressFactor", m_suppression_factor);
+        m_tilde_h0_k_program->set_uniform("u_N", m_N);
+        m_tilde_h0_k_program->set_uniform("u_L", m_L);
+
+        m_tilde_h0_k->bind_image(0, 0, 0, GL_WRITE_ONLY, m_tilde_h0_k->internal_format());
+        m_tilde_h0_minus_k->bind_image(1, 0, 0, GL_WRITE_ONLY, m_tilde_h0_minus_k->internal_format());
+
+        uint32_t num_groups = m_N / COMPUTE_LOCAL_WORK_GROUP_SIZE;
+
+        glDispatchCompute(num_groups, num_groups, 1);
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------------
+
+    void tilde_h0_t()
+    {
+        m_wind_direction = glm::normalize(m_wind_direction);
+
+        m_tilde_h0_k_program->use();
+
+        if (m_tilde_h0_k_program->set_uniform("noise0", 2))
+            m_noise0->bind(2);
+        if (m_tilde_h0_k_program->set_uniform("noise1", 3))
+            m_noise1->bind(3);
+        if (m_tilde_h0_k_program->set_uniform("noise2", 4))
+            m_noise2->bind(4);
+        if (m_tilde_h0_k_program->set_uniform("noise3", 5))
+            m_noise3->bind(5);
+
+        m_tilde_h0_k_program->set_uniform("u_Amplitude", m_amplitude);
+        m_tilde_h0_k_program->set_uniform("u_WindSpeed", m_wind_speed);
+        m_tilde_h0_k_program->set_uniform("u_WindDirection", m_wind_direction);
+        m_tilde_h0_k_program->set_uniform("u_SuppressFactor", m_suppression_factor);
+        m_tilde_h0_k_program->set_uniform("u_N", m_N);
+        m_tilde_h0_k_program->set_uniform("u_L", m_L);
+
+        m_tilde_h0_k->bind_image(0, 0, 0, GL_WRITE_ONLY, m_tilde_h0_k->internal_format());
+        m_tilde_h0_minus_k->bind_image(1, 0, 0, GL_WRITE_ONLY, m_tilde_h0_minus_k->internal_format());
+
+        uint32_t num_groups = m_N / COMPUTE_LOCAL_WORK_GROUP_SIZE;
+
+        glDispatchCompute(num_groups, num_groups, 1);
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------------
+
     bool create_shaders()
     {
         {
             // Create general shaders
             m_triangle_vs        = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_VERTEX_SHADER, "shader/triangle_vs.glsl"));
             m_visualize_image_fs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/visualize_image_fs.glsl"));
-            //m_tilde_h_t_cs       = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/tilde_h_t_cs.glsl"));
+            m_tilde_h0_k_cs       = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/tilde_h0_k_cs.glsl"));
+            m_tilde_h0_t_cs      = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/tilde_h0_t_cs.glsl"));
 
             {
                 if (!m_triangle_vs || !m_visualize_image_fs)
@@ -203,23 +279,41 @@ private:
                 m_visualize_image_program->uniform_block_binding("GlobalUniforms", 0);
             }
 
-            //{
-            //    if (!m_tilde_h_t_cs)
-            //    {
-            //        DW_LOG_FATAL("Failed to create Shaders");
-            //        return false;
-            //    }
+            {
+                if (!m_tilde_h0_k_cs)
+                {
+                    DW_LOG_FATAL("Failed to create Shaders");
+                    return false;
+                }
 
-            //    // Create general shader program
-            //    dw::gl::Shader* shaders[] = { m_tilde_h_t_cs.get() };
-            //    m_tilde_h_t_program            = std::make_unique<dw::gl::Program>(1, shaders);
+                // Create general shader program
+                dw::gl::Shader* shaders[] = { m_tilde_h0_k_cs.get() };
+                m_tilde_h0_k_program      = std::make_unique<dw::gl::Program>(1, shaders);
 
-            //    if (!m_tilde_h_t_program)
-            //    {
-            //        DW_LOG_FATAL("Failed to create Shader Program");
-            //        return false;
-            //    }
-            //}
+                if (!m_tilde_h0_k_program)
+                {
+                    DW_LOG_FATAL("Failed to create Shader Program");
+                    return false;
+                }
+            }
+
+            {
+                if (!m_tilde_h0_t_cs)
+                {
+                    DW_LOG_FATAL("Failed to create Shaders");
+                    return false;
+                }
+
+                // Create general shader program
+                dw::gl::Shader* shaders[] = { m_tilde_h0_t_cs.get() };
+                m_tilde_h0_t_program      = std::make_unique<dw::gl::Program>(1, shaders);
+
+                if (!m_tilde_h0_t_program)
+                {
+                    DW_LOG_FATAL("Failed to create Shader Program");
+                    return false;
+                }
+            }
         }
 
         return true;
@@ -229,12 +323,15 @@ private:
 
     void create_ocean_textures()
     {
-        m_noise0          = std::unique_ptr<dw::gl::Texture2D>(dw::gl::Texture2D::create_from_files("noise/LDR_LLL1_0.png", false, false));
-        m_noise1          = std::unique_ptr<dw::gl::Texture2D>(dw::gl::Texture2D::create_from_files("noise/LDR_LLL1_1.png", false, false));
-        m_noise2          = std::unique_ptr<dw::gl::Texture2D>(dw::gl::Texture2D::create_from_files("noise/LDR_LLL1_2.png", false, false));
-        m_noise3          = std::unique_ptr<dw::gl::Texture2D>(dw::gl::Texture2D::create_from_files("noise/LDR_LLL1_3.png", false, false));
-        m_tilde_h_k       = std::make_unique<dw::gl::Texture2D>(DISPLACEMENT_MAP_SIZE, DISPLACEMENT_MAP_SIZE, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
-        m_tilde_h_minus_k = std::make_unique<dw::gl::Texture2D>(DISPLACEMENT_MAP_SIZE, DISPLACEMENT_MAP_SIZE, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
+        m_noise0           = std::unique_ptr<dw::gl::Texture2D>(dw::gl::Texture2D::create_from_files("noise/LDR_LLL1_0.png", false, false));
+        m_noise1           = std::unique_ptr<dw::gl::Texture2D>(dw::gl::Texture2D::create_from_files("noise/LDR_LLL1_1.png", false, false));
+        m_noise2           = std::unique_ptr<dw::gl::Texture2D>(dw::gl::Texture2D::create_from_files("noise/LDR_LLL1_2.png", false, false));
+        m_noise3           = std::unique_ptr<dw::gl::Texture2D>(dw::gl::Texture2D::create_from_files("noise/LDR_LLL1_3.png", false, false));
+        m_tilde_h0_k       = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
+        m_tilde_h0_minus_k = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
+        m_tilde_h0_t_dx       = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
+        m_tilde_h0_t_dy    = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
+        m_tilde_h0_t_dz       = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
 
         m_noise0->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
         m_noise0->set_min_filter(GL_NEAREST);
@@ -252,13 +349,25 @@ private:
         m_noise3->set_min_filter(GL_NEAREST);
         m_noise3->set_mag_filter(GL_NEAREST);
 
-        m_tilde_h_k->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
-        m_tilde_h_k->set_min_filter(GL_NEAREST);
-        m_tilde_h_k->set_mag_filter(GL_NEAREST);
+        m_tilde_h0_k->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
+        m_tilde_h0_k->set_min_filter(GL_NEAREST);
+        m_tilde_h0_k->set_mag_filter(GL_NEAREST);
 
-        m_tilde_h_minus_k->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
-        m_tilde_h_minus_k->set_min_filter(GL_NEAREST);
-        m_tilde_h_minus_k->set_mag_filter(GL_NEAREST);
+        m_tilde_h0_minus_k->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
+        m_tilde_h0_minus_k->set_min_filter(GL_NEAREST);
+        m_tilde_h0_minus_k->set_mag_filter(GL_NEAREST);
+
+        m_tilde_h0_t_dx->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
+        m_tilde_h0_t_dx->set_min_filter(GL_NEAREST);
+        m_tilde_h0_t_dx->set_mag_filter(GL_NEAREST);
+
+        m_tilde_h0_t_dy->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
+        m_tilde_h0_t_dy->set_min_filter(GL_NEAREST);
+        m_tilde_h0_t_dy->set_mag_filter(GL_NEAREST);
+
+        m_tilde_h0_t_dz->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
+        m_tilde_h0_t_dz->set_min_filter(GL_NEAREST);
+        m_tilde_h0_t_dz->set_mag_filter(GL_NEAREST);
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -336,17 +445,22 @@ private:
     // General GPU resources.
     std::unique_ptr<dw::gl::Shader> m_triangle_vs;
     std::unique_ptr<dw::gl::Shader> m_visualize_image_fs;
-    std::unique_ptr<dw::gl::Shader> m_tilde_h_t_cs;
+    std::unique_ptr<dw::gl::Shader> m_tilde_h0_k_cs;
+    std::unique_ptr<dw::gl::Shader> m_tilde_h0_t_cs;
 
     std::unique_ptr<dw::gl::Program> m_visualize_image_program;
-    std::unique_ptr<dw::gl::Program> m_tilde_h_t_program;
+    std::unique_ptr<dw::gl::Program> m_tilde_h0_k_program;
+    std::unique_ptr<dw::gl::Program> m_tilde_h0_t_program;
 
     std::unique_ptr<dw::gl::Texture2D> m_noise0;
     std::unique_ptr<dw::gl::Texture2D> m_noise1;
     std::unique_ptr<dw::gl::Texture2D> m_noise2;
     std::unique_ptr<dw::gl::Texture2D> m_noise3;
-    std::unique_ptr<dw::gl::Texture2D> m_tilde_h_k;
-    std::unique_ptr<dw::gl::Texture2D> m_tilde_h_minus_k;
+    std::unique_ptr<dw::gl::Texture2D> m_tilde_h0_k;
+    std::unique_ptr<dw::gl::Texture2D> m_tilde_h0_minus_k;
+    std::unique_ptr<dw::gl::Texture2D> m_tilde_h0_t_dy;
+    std::unique_ptr<dw::gl::Texture2D> m_tilde_h0_t_dx;
+    std::unique_ptr<dw::gl::Texture2D> m_tilde_h0_t_dz;
 
     std::unique_ptr<dw::gl::UniformBuffer> m_global_ubo;
     std::unique_ptr<dw::Camera>            m_main_camera;
@@ -364,6 +478,14 @@ private:
     float m_camera_x;
     float m_camera_y;
     float m_light_size = 0.07f;
+
+    // FFT options
+    float       m_wind_speed         = 80.0f;
+    float       m_amplitude          = 2.0f;
+    float       m_suppression_factor = 0.1f;
+    glm::vec2   m_wind_direction     = glm::vec2(1.0f, 1.0f);
+    int32_t     m_N                  = DISPLACEMENT_MAP_SIZE;
+    int32_t     m_L                  = 1000;
 };
 
 DW_DECLARE_MAIN(FFTOceanWaves)

@@ -16,13 +16,22 @@ out vec4 FS_OUT_Color;
 
 uniform sampler2D s_Image;
 
+uniform int u_NumChannels;
+
 // ------------------------------------------------------------------
 // MAIN  ------------------------------------------------------------
 // ------------------------------------------------------------------
 
 void main(void)
 {
-    FS_OUT_Color = vec4(texture(s_Image, FS_IN_TexCoord).rgb, 1.0);
+    if (u_NumChannels == 1)
+        FS_OUT_Color = vec4(texture(s_Image, FS_IN_TexCoord).rrr, 1.0);
+    else if (u_NumChannels == 2)
+        FS_OUT_Color = vec4(texture(s_Image, FS_IN_TexCoord).rg, 0.0, 1.0);
+    else if (u_NumChannels == 3)
+        FS_OUT_Color = vec4(texture(s_Image, FS_IN_TexCoord).rgb, 1.0);
+    else
+        FS_OUT_Color = texture(s_Image, FS_IN_TexCoord);
 }
 
 // ------------------------------------------------------------------

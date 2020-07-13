@@ -25,14 +25,14 @@ uniform int u_L;
 
 const float g = 9.81;
 
-layout (binding = 0, r32f) writeonly uniform image2D tilde_h0k;
-layout (binding = 1, r32f) writeonly uniform image2D tilde_h0minusk;
+layout (binding = 0, rg32f) writeonly uniform image2D tilde_h0k;
+layout (binding = 1, rg32f) writeonly uniform image2D tilde_h0minusk;
 
 // ------------------------------------------------------------------
 // FUNCTIONS --------------------------------------------------------
 // ------------------------------------------------------------------
 
-float suppression_factor(vec2 k_mag_sqr)
+float suppression_factor(float k_mag_sqr)
 {
 	return exp(-k_mag_sqr * u_SuppressFactor * u_SuppressFactor);
 }
@@ -53,9 +53,9 @@ vec4 gauss_rnd()
 	vec2 texCoord = vec2(gl_GlobalInvocationID.xy)/float(u_N);
 	
 	float noise00 = clamp(texture(noise0, texCoord).r, 0.001, 1.0);
-	float noise01 = clamp(texture(noise0, texCoord).r, 0.001, 1.0);
-	float noise02 = clamp(texture(noise1, texCoord).r, 0.001, 1.0);
-	float noise03 = clamp(texture(noise1, texCoord).r, 0.001, 1.0);
+	float noise01 = clamp(texture(noise1, texCoord).r, 0.001, 1.0);
+	float noise02 = clamp(texture(noise2, texCoord).r, 0.001, 1.0);
+	float noise03 = clamp(texture(noise3, texCoord).r, 0.001, 1.0);
 	
 	float u0 = 2.0*M_PI*noise00;
 	float v0 = sqrt(-2.0 * log(noise01));
@@ -90,7 +90,7 @@ void main()
 	vec4 rnd = gauss_rnd();
 
 	imageStore(tilde_h0k, ivec2(gl_GlobalInvocationID.xy), vec4(rnd.xy * h0k, 0.0, 1.0));
-	imageStore(tilde_h0minusk, ivec2(gl_GlobalInvocationID.xy), vec4(rnd.xy * h0minusk, 0.0, 1.0));
+	imageStore(tilde_h0minusk, ivec2(gl_GlobalInvocationID.xy), vec4(rnd.zw * h0minusk, 0.0, 1.0));
 }
 
 // ------------------------------------------------------------------
