@@ -8,7 +8,7 @@ in vec2 FS_IN_TexCoord;
 // OUTPUT VARIABLES  ------------------------------------------------
 // ------------------------------------------------------------------
 
-out vec3 FS_OUT_Color;
+out vec4 FS_OUT_Color;
 
 // ------------------------------------------------------------------
 // UNIFORMS  --------------------------------------------------------
@@ -22,7 +22,7 @@ uniform sampler2D s_Image;
 
 void main(void)
 {
-    FS_OUT_Color = texture(s_Image, FS_IN_TexCoord).rgb;
+    FS_OUT_Color = vec4(texture(s_Image, FS_IN_TexCoord).rgb, 1.0);
 }
 
 // ------------------------------------------------------------------
