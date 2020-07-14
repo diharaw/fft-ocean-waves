@@ -61,7 +61,8 @@ protected:
 
         m_debug_draw.aabb(glm::vec3(10.0f), glm::vec3(-10.0f), glm::vec3(1.0f, 0.0f, 0.0f));
         
-        render_visualization_quad(m_tilde_h0_k);
+        tilde_h0_t();
+        render_visualization_quad(m_tilde_h0_t_dy);
 
         m_debug_draw.render(nullptr, m_width, m_height, m_global_uniforms.view_proj, m_main_camera->m_position);
     }
@@ -222,26 +223,17 @@ private:
     {
         m_wind_direction = glm::normalize(m_wind_direction);
 
-        m_tilde_h0_k_program->use();
+        m_tilde_h0_t_program->use();
 
-        if (m_tilde_h0_k_program->set_uniform("noise0", 2))
-            m_noise0->bind(2);
-        if (m_tilde_h0_k_program->set_uniform("noise1", 3))
-            m_noise1->bind(3);
-        if (m_tilde_h0_k_program->set_uniform("noise2", 4))
-            m_noise2->bind(4);
-        if (m_tilde_h0_k_program->set_uniform("noise3", 5))
-            m_noise3->bind(5);
+        m_tilde_h0_k->bind_image(0, 0, 0, GL_READ_ONLY, m_tilde_h0_k->internal_format());
+        m_tilde_h0_minus_k->bind_image(1, 0, 0, GL_READ_ONLY, m_tilde_h0_minus_k->internal_format());
+        m_tilde_h0_t_dx->bind_image(2, 0, 0, GL_WRITE_ONLY, m_tilde_h0_t_dx->internal_format());
+        m_tilde_h0_t_dy->bind_image(3, 0, 0, GL_WRITE_ONLY, m_tilde_h0_t_dy->internal_format());
+        m_tilde_h0_t_dz->bind_image(4, 0, 0, GL_WRITE_ONLY, m_tilde_h0_t_dz->internal_format());
 
-        m_tilde_h0_k_program->set_uniform("u_Amplitude", m_amplitude);
-        m_tilde_h0_k_program->set_uniform("u_WindSpeed", m_wind_speed);
-        m_tilde_h0_k_program->set_uniform("u_WindDirection", m_wind_direction);
-        m_tilde_h0_k_program->set_uniform("u_SuppressFactor", m_suppression_factor);
-        m_tilde_h0_k_program->set_uniform("u_N", m_N);
-        m_tilde_h0_k_program->set_uniform("u_L", m_L);
-
-        m_tilde_h0_k->bind_image(0, 0, 0, GL_WRITE_ONLY, m_tilde_h0_k->internal_format());
-        m_tilde_h0_minus_k->bind_image(1, 0, 0, GL_WRITE_ONLY, m_tilde_h0_minus_k->internal_format());
+        m_tilde_h0_t_program->set_uniform("u_Time", float(glfwGetTime()));
+        m_tilde_h0_t_program->set_uniform("u_N", m_N);
+        m_tilde_h0_t_program->set_uniform("u_L", m_L);
 
         uint32_t num_groups = m_N / COMPUTE_LOCAL_WORK_GROUP_SIZE;
 
