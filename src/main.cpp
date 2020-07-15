@@ -80,8 +80,7 @@ protected:
         create_camera();
         tilde_h0_k();
         generate_bit_reversed_indices();
-        generate_twiddle_factors();
-
+        
         return true;
     }
 
@@ -99,7 +98,7 @@ protected:
         update_uniforms();
 
         m_debug_draw.aabb(glm::vec3(10.0f), glm::vec3(-10.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-
+        generate_twiddle_factors();
         tilde_h0_t();
         render_visualization_quad(m_tilde_h0_t_dy);
 
@@ -184,6 +183,7 @@ protected:
         settings.width        = 1920;
         settings.height       = 1080;
         settings.title        = "FFT Ocean Waves (c) 2020 Dihara Wijetunga";
+        settings.enable_debug_callback = false;
 
         return settings;
     }
@@ -194,9 +194,9 @@ private:
 
     // -----------------------------------------------------------------------------------------------------------------------------------
 
-    void render_visualization_quad(std::unique_ptr<dw::gl::Texture2D>& texture)
+    void render_visualization_quad(std::unique_ptr<dw::gl::Texture2D>& texture, int w = 0, int h = 0)
     {
-        glViewport(0, 0, texture->width(), texture->height());
+        glViewport(0, 0, w == 0 ? texture->width() : w, h == 0 ? texture->height() : h);
 
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);
@@ -284,12 +284,16 @@ private:
 
     void generate_twiddle_factors()
     {
+        m_twiddle_factors_program->use();
+
         uint32_t log_2_n = int(log(m_N)/log(2));
         uint32_t num_groups = m_N / COMPUTE_LOCAL_WORK_GROUP_SIZE;
 
         m_twiddle_factors->bind_image(0, 0, 0, GL_WRITE_ONLY, m_twiddle_factors->internal_format());
 
         m_bit_reversed_indices->bind_base(0);
+
+        m_twiddle_factors_program->set_uniform("m_N", m_N);
 
         glDispatchCompute(log_2_n, num_groups, 1);
     }
@@ -306,7 +310,7 @@ private:
         for (int i = 0; i < m_N; i++)
             indices[i] = reverse_bits(i, num_bits);
 
-        m_bit_reversed_indices = std::unique_ptr<dw::gl::ShaderStorageBuffer>(new dw::gl::ShaderStorageBuffer(0, sizeof(int32_t) * m_N, indices.data()));
+        m_bit_reversed_indices = std::unique_ptr<dw::gl::ShaderStorageBuffer>(new dw::gl::ShaderStorageBuffer(GL_STATIC_DRAW, sizeof(int32_t) * m_N, indices.data()));
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -319,6 +323,7 @@ private:
             m_visualize_image_fs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/visualize_image_fs.glsl"));
             m_tilde_h0_k_cs      = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/tilde_h0_k_cs.glsl"));
             m_tilde_h0_t_cs      = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/tilde_h0_t_cs.glsl"));
+            m_twiddle_factors_cs      = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/twiddle_factors_cs.glsl"));
 
             {
                 if (!m_triangle_vs || !m_visualize_image_fs)
@@ -370,6 +375,24 @@ private:
                 m_tilde_h0_t_program      = std::make_unique<dw::gl::Program>(1, shaders);
 
                 if (!m_tilde_h0_t_program)
+                {
+                    DW_LOG_FATAL("Failed to create Shader Program");
+                    return false;
+                }
+            }
+
+            {
+                if (!m_twiddle_factors_cs)
+                {
+                    DW_LOG_FATAL("Failed to create Shaders");
+                    return false;
+                }
+
+                // Create general shader program
+                dw::gl::Shader* shaders[] = { m_twiddle_factors_cs.get() };
+                m_twiddle_factors_program      = std::make_unique<dw::gl::Program>(1, shaders);
+
+                if (!m_twiddle_factors_program)
                 {
                     DW_LOG_FATAL("Failed to create Shader Program");
                     return false;
