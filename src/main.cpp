@@ -42,7 +42,7 @@ protected:
         // Create camera.
         create_camera();
         tilde_h0_k();
-        
+
         return true;
     }
 
@@ -60,7 +60,7 @@ protected:
         update_uniforms();
 
         m_debug_draw.aabb(glm::vec3(10.0f), glm::vec3(-10.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        
+
         tilde_h0_t();
         render_visualization_quad(m_tilde_h0_t_dy);
 
@@ -242,13 +242,26 @@ private:
 
     // -----------------------------------------------------------------------------------------------------------------------------------
 
+    void generate_twiddle_factors()
+    {
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------------
+
+    void generate_bit_reversed_indices()
+    {
+    
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------------
+
     bool create_shaders()
     {
         {
             // Create general shaders
             m_triangle_vs        = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_VERTEX_SHADER, "shader/triangle_vs.glsl"));
             m_visualize_image_fs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/visualize_image_fs.glsl"));
-            m_tilde_h0_k_cs       = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/tilde_h0_k_cs.glsl"));
+            m_tilde_h0_k_cs      = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/tilde_h0_k_cs.glsl"));
             m_tilde_h0_t_cs      = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/tilde_h0_t_cs.glsl"));
 
             {
@@ -321,9 +334,10 @@ private:
         m_noise3           = std::unique_ptr<dw::gl::Texture2D>(dw::gl::Texture2D::create_from_files("noise/LDR_LLL1_3.png", false, false));
         m_tilde_h0_k       = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
         m_tilde_h0_minus_k = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
-        m_tilde_h0_t_dx       = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
+        m_tilde_h0_t_dx    = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
         m_tilde_h0_t_dy    = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
-        m_tilde_h0_t_dz       = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
+        m_tilde_h0_t_dz    = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
+        m_twiddle_factors  = std::make_unique<dw::gl::Texture2D>(log(m_N) / log(2.0), m_N, 1, 1, 1, GL_RGBA32F, GL_RGBA, GL_FLOAT);
 
         m_noise0->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
         m_noise0->set_min_filter(GL_NEAREST);
@@ -360,6 +374,10 @@ private:
         m_tilde_h0_t_dz->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
         m_tilde_h0_t_dz->set_min_filter(GL_NEAREST);
         m_tilde_h0_t_dz->set_mag_filter(GL_NEAREST);
+
+        m_twiddle_factors->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
+        m_twiddle_factors->set_min_filter(GL_NEAREST);
+        m_twiddle_factors->set_mag_filter(GL_NEAREST);
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -439,10 +457,12 @@ private:
     std::unique_ptr<dw::gl::Shader> m_visualize_image_fs;
     std::unique_ptr<dw::gl::Shader> m_tilde_h0_k_cs;
     std::unique_ptr<dw::gl::Shader> m_tilde_h0_t_cs;
+    std::unique_ptr<dw::gl::Shader> m_twiddle_factors_cs;
 
     std::unique_ptr<dw::gl::Program> m_visualize_image_program;
     std::unique_ptr<dw::gl::Program> m_tilde_h0_k_program;
     std::unique_ptr<dw::gl::Program> m_tilde_h0_t_program;
+    std::unique_ptr<dw::gl::Program> m_twiddle_factors_program;
 
     std::unique_ptr<dw::gl::Texture2D> m_noise0;
     std::unique_ptr<dw::gl::Texture2D> m_noise1;
@@ -453,6 +473,9 @@ private:
     std::unique_ptr<dw::gl::Texture2D> m_tilde_h0_t_dy;
     std::unique_ptr<dw::gl::Texture2D> m_tilde_h0_t_dx;
     std::unique_ptr<dw::gl::Texture2D> m_tilde_h0_t_dz;
+    std::unique_ptr<dw::gl::Texture2D> m_twiddle_factors;
+
+    std::unique_ptr<dw::gl::ShaderStorageBuffer> m_bit_reversed_indices;
 
     std::unique_ptr<dw::gl::UniformBuffer> m_global_ubo;
     std::unique_ptr<dw::Camera>            m_main_camera;
@@ -472,12 +495,12 @@ private:
     float m_light_size = 0.07f;
 
     // FFT options
-    float       m_wind_speed         = 80.0f;
-    float       m_amplitude          = 2.0f;
-    float       m_suppression_factor = 0.1f;
-    glm::vec2   m_wind_direction     = glm::vec2(1.0f, 1.0f);
-    int32_t     m_N                  = DISPLACEMENT_MAP_SIZE;
-    int32_t     m_L                  = 1000;
+    float     m_wind_speed         = 80.0f;
+    float     m_amplitude          = 2.0f;
+    float     m_suppression_factor = 0.1f;
+    glm::vec2 m_wind_direction     = glm::vec2(1.0f, 1.0f);
+    int32_t   m_N                  = DISPLACEMENT_MAP_SIZE;
+    int32_t   m_L                  = 1000;
 };
 
 DW_DECLARE_MAIN(FFTOceanWaves)
