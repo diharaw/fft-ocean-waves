@@ -54,9 +54,9 @@ vec3 interpolate_3d(vec3 v0, vec3 v1, vec3 v2)
 
 void main()
 {
-    FS_IN_FragPos = interpolate_3d(TES_IN_FragPos[0], TES_IN_FragPos[1], TES_IN_FragPos[2]);
+    FS_IN_FragPos  = interpolate_3d(TES_IN_FragPos[0], TES_IN_FragPos[1], TES_IN_FragPos[2]);
     FS_IN_TexCoord = interpolate_2d(TES_IN_TexCoord[0], TES_IN_TexCoord[1], TES_IN_TexCoord[2]);
-    
+
     FS_IN_FragPos.y += texture(s_Dy, FS_IN_TexCoord).r * u_DisplacementScale;
     FS_IN_FragPos.x -= texture(s_Dx, FS_IN_TexCoord).r * u_Choppiness;
     FS_IN_FragPos.z -= texture(s_Dz, FS_IN_TexCoord).r * u_Choppiness;

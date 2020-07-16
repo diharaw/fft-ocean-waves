@@ -1,4 +1,4 @@
-layout (vertices = 3) out;
+layout(vertices = 3) out;
 
 // ------------------------------------------------------------------
 // INPUTS -----------------------------------------------------------
@@ -44,9 +44,9 @@ float tessellation_level(float d0, float d1)
 
 void main()
 {
-    TES_IN_FragPos[gl_InvocationID] = TCS_IN_FragPos[gl_InvocationID];
+    TES_IN_FragPos[gl_InvocationID]  = TCS_IN_FragPos[gl_InvocationID];
     TES_IN_TexCoord[gl_InvocationID] = TCS_IN_TexCoord[gl_InvocationID];
-    
+
     // Calculate distances to each vertex
     float eye_to_v0_dist = distance(u_CameraPos, TES_IN_FragPos[0]);
     float eye_to_v1_dist = distance(u_CameraPos, TES_IN_FragPos[1]);

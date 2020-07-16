@@ -16,6 +16,7 @@
 #define DEBUG_CAMERA_FAR_PLANE 10000.0f
 #define DISPLACEMENT_MAP_SIZE 256
 #define COMPUTE_LOCAL_WORK_GROUP_SIZE 32
+#define ENVIRONMENT_MAP_SIZE 512
 #define GRID_SIZE 1024
 #define GRID_UV_SCALE 64
 
@@ -62,6 +63,128 @@ unsigned long reverse_bits(unsigned long codeword, unsigned char maxLength)
     return codeword;
 }
 
+struct SkyModel
+{
+    const float SCALE           = 1000.0f;
+    const int   TRANSMITTANCE_W = 256;
+    const int   TRANSMITTANCE_H = 64;
+
+    const int IRRADIANCE_W = 64;
+    const int IRRADIANCE_H = 16;
+
+    const int INSCATTER_R    = 32;
+    const int INSCATTER_MU   = 128;
+    const int INSCATTER_MU_S = 32;
+    const int INSCATTER_NU   = 8;
+
+    glm::vec3          m_beta_r        = glm::vec3(0.0058f, 0.0135f, 0.0331f);
+    glm::vec3          m_direction     = glm::vec3(0.0f, 0.0f, 1.0f);
+    float              m_mie_g         = 0.75f;
+    float              m_sun_intensity = 100.0f;
+    dw::gl::Texture2D* m_transmittance_t;
+    dw::gl::Texture2D* m_irradiance_t;
+    dw::gl::Texture3D* m_inscatter_t;
+    float              m_sun_angle = 0.0f;
+
+    bool initialize()
+    {
+        m_transmittance_t = new_texture_2d(TRANSMITTANCE_W, TRANSMITTANCE_H);
+        m_irradiance_t    = new_texture_2d(IRRADIANCE_W, IRRADIANCE_H);
+        m_inscatter_t     = new_texture_3d(INSCATTER_MU_S * INSCATTER_NU, INSCATTER_MU, INSCATTER_R);
+
+        FILE* transmittance = fopen("texture/transmittance.raw", "r");
+
+        if (transmittance)
+        {
+            size_t n = sizeof(float) * TRANSMITTANCE_W * TRANSMITTANCE_H * 4;
+
+            void* data = malloc(n);
+            fread(data, n, 1, transmittance);
+
+            m_transmittance_t->set_data(0, 0, data);
+
+            fclose(transmittance);
+            free(data);
+        }
+        else
+            return false;
+
+        FILE* irradiance = fopen("texture/irradiance.raw", "r");
+
+        if (irradiance)
+        {
+            size_t n = sizeof(float) * IRRADIANCE_W * IRRADIANCE_H * 4;
+
+            void* data = malloc(n);
+            fread(data, n, 1, irradiance);
+
+            m_irradiance_t->set_data(0, 0, data);
+
+            fclose(irradiance);
+            free(data);
+        }
+        else
+            return false;
+
+        FILE* inscatter = fopen("texture/inscatter.raw", "r");
+
+        if (inscatter)
+        {
+            size_t n = sizeof(float) * INSCATTER_MU_S * INSCATTER_NU * INSCATTER_MU * INSCATTER_R * 4;
+
+            void* data = malloc(n);
+            fread(data, n, 1, inscatter);
+
+            m_inscatter_t->set_data(0, data);
+
+            fclose(inscatter);
+            free(data);
+        }
+        else
+            return false;
+
+        return true;
+    }
+
+    void set_render_uniforms(dw::gl::Program* program)
+    {
+        m_direction = glm::normalize(glm::vec3(0.0f, sin(m_sun_angle), cos(m_sun_angle)));
+
+        program->set_uniform("betaR", m_beta_r / SCALE);
+        program->set_uniform("mieG", m_mie_g);
+        program->set_uniform("SUN_INTENSITY", m_sun_intensity);
+        program->set_uniform("EARTH_POS", glm::vec3(0.0f, 6360010.0f, 0.0f));
+        program->set_uniform("SUN_DIR", m_direction * -1.0f);
+
+        if (program->set_uniform("s_Transmittance", 3))
+            m_transmittance_t->bind(3);
+
+        if (program->set_uniform("s_Irradiance", 4))
+            m_irradiance_t->bind(4);
+
+        if (program->set_uniform("s_Inscatter", 5))
+            m_inscatter_t->bind(5);
+    }
+
+    dw::gl::Texture2D* new_texture_2d(int width, int height)
+    {
+        dw::gl::Texture2D* texture = new dw::gl::Texture2D(width, height, 1, 1, 1, GL_RGBA32F, GL_RGBA, GL_FLOAT);
+        texture->set_min_filter(GL_LINEAR);
+        texture->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
+
+        return texture;
+    }
+
+    dw::gl::Texture3D* new_texture_3d(int width, int height, int depth)
+    {
+        dw::gl::Texture3D* texture = new dw::gl::Texture3D(width, height, depth, 1, GL_RGBA32F, GL_RGBA, GL_FLOAT);
+        texture->set_min_filter(GL_LINEAR);
+        texture->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
+
+        return texture;
+    }
+};
+
 struct GridVertex
 {
     glm::vec3 position;
@@ -79,9 +202,13 @@ protected:
         if (!create_shaders())
             return false;
 
-        create_ocean_textures();
+        create_textures();
+        create_skybox_resources();
 
         if (!create_uniform_buffer())
+            return false;
+
+        if (!m_sky_model.initialize())
             return false;
 
         // Create camera.
@@ -92,6 +219,7 @@ protected:
         generate_bit_reversed_indices();
         generate_twiddle_factors();
         generate_grid(GRID_SIZE, GRID_UV_SCALE);
+        glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
 
         return true;
     }
@@ -100,25 +228,26 @@ protected:
 
     void update(double delta) override
     {
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        debug_gui();
+        if (m_debug_gui)
+            debug_gui();
 
         // Update camera.
         update_camera();
 
         update_uniforms();
 
+        render_envmap();
         tilde_h0_t();
         butterfly_fft(m_tilde_h0_t_dy, m_dy);
         butterfly_fft(m_tilde_h0_t_dx, m_dx);
         butterfly_fft(m_tilde_h0_t_dz, m_dz);
         generate_normal_map();
 
-        render_grid_wireframe_tessellated();
-        render_visualization_quad(m_dy);
+        render_grid_lit_tessellated();
+        render_skybox();
+
+        if (m_visualize_displacement_map)
+            render_visualization_quad(m_dy);
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -147,6 +276,9 @@ protected:
 
         if (code == GLFW_KEY_SPACE)
             m_mouse_look = true;
+
+        if (code == GLFW_KEY_G)
+            m_debug_gui = !m_debug_gui;
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -207,7 +339,6 @@ protected:
     // -----------------------------------------------------------------------------------------------------------------------------------
 
 private:
-
     // -----------------------------------------------------------------------------------------------------------------------------------
 
     void debug_gui()
@@ -216,6 +347,9 @@ private:
         ImGui::InputFloat("Choppiness", &m_choppiness);
         ImGui::InputFloat("Wind Speed (m/s)", &m_wind_speed);
         ImGui::InputFloat("Amplitude", &m_amplitude);
+        ImGui::SliderAngle("Sun Angle", &m_sky_model.m_sun_angle, 0.0f, -180.0f);
+        ImGui::ColorPicker3("Sea Color", &m_sea_color[0]);
+        ImGui::Checkbox("Visualize Displacement Map", &m_visualize_displacement_map);
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -273,6 +407,10 @@ private:
 
     void render_grid_wireframe_tessellated()
     {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
         glViewport(0, 0, m_width, m_height);
 
         glEnable(GL_DEPTH_TEST);
@@ -306,6 +444,103 @@ private:
         glDrawElements(GL_PATCHES, m_grid_num_indices, GL_UNSIGNED_INT, 0);
 
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------------
+
+    void render_grid_lit_tessellated()
+    {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        glViewport(0, 0, m_width, m_height);
+
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+
+        m_ocean_lit_program->use();
+        m_global_ubo->bind_base(0);
+
+        m_ocean_lit_program->set_uniform("u_CameraPos", m_main_camera->m_position);
+        m_ocean_lit_program->set_uniform("u_DisplacementScale", m_displacement_scale);
+        m_ocean_lit_program->set_uniform("u_Choppiness", m_choppiness);
+        m_ocean_lit_program->set_uniform("u_SeaColor", m_sea_color);
+        m_ocean_lit_program->set_uniform("u_SunDirection", m_sky_model.m_direction);
+
+        if (m_ocean_lit_program->set_uniform("s_Dy", 0))
+            m_dy->bind(0);
+
+        if (m_ocean_lit_program->set_uniform("s_Dx", 1))
+            m_dx->bind(1);
+
+        if (m_ocean_lit_program->set_uniform("s_Dz", 2))
+            m_dz->bind(2);
+
+        if (m_ocean_lit_program->set_uniform("s_NormalMap", 3))
+            m_normal_map->bind(3);
+
+        if (m_ocean_lit_program->set_uniform("s_Sky", 4))
+            m_env_cubemap->bind(4);
+
+        m_grid_vao->bind();
+
+        glPatchParameteri(GL_PATCH_VERTICES, 3);
+        glDrawElements(GL_PATCHES, m_grid_num_indices, GL_UNSIGNED_INT, 0);
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------------
+
+    void render_envmap()
+    {
+        m_sky_envmap_program->use();
+        m_sky_model.set_render_uniforms(m_sky_envmap_program.get());
+
+        for (int i = 0; i < 6; i++)
+        {
+            m_sky_envmap_program->set_uniform("u_Projection", m_capture_projection);
+            m_sky_envmap_program->set_uniform("u_View", m_capture_views[i]);
+            m_sky_envmap_program->set_uniform("u_CameraPos", m_main_camera->m_position);
+
+            m_cubemap_fbos[i]->bind();
+            glViewport(0, 0, ENVIRONMENT_MAP_SIZE, ENVIRONMENT_MAP_SIZE);
+
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+            m_cube_vao->bind();
+
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+        }
+
+        m_env_cubemap->generate_mipmaps();
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------------
+
+    void render_skybox()
+    {
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        glDisable(GL_CULL_FACE);
+
+        m_cubemap_program->use();
+        m_cube_vao->bind();
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, m_width, m_height);
+
+        m_cubemap_program->set_uniform("u_View", m_main_camera->m_view);
+        m_cubemap_program->set_uniform("u_Projection", m_main_camera->m_projection);
+        m_cubemap_program->set_uniform("u_CameraPos", m_main_camera->m_position);
+
+        if (m_cubemap_program->set_uniform("s_Cubemap", 0))
+            m_env_cubemap->bind(0);
+
+        glDrawArrays(GL_TRIANGLES, 0, 36);
+
+        glDepthFunc(GL_LESS);
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -602,6 +837,11 @@ private:
             m_grid_tcs           = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_TESS_CONTROL_SHADER, "shader/grid_tcs.glsl"));
             m_grid_tes           = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_TESS_EVALUATION_SHADER, "shader/grid_tes.glsl"));
             m_ocean_wireframe_fs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/wireframe_fs.glsl"));
+            m_ocean_lit_fs       = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/ocean_fs.glsl"));
+            m_sky_envmap_vs      = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_VERTEX_SHADER, "shader/sky_envmap_vs.glsl"));
+            m_sky_envmap_fs      = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/sky_envmap_fs.glsl"));
+            m_cubemap_vs         = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_VERTEX_SHADER, "shader/sky_vs.glsl"));
+            m_cubemap_fs         = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/sky_fs.glsl"));
 
             {
                 if (!m_triangle_vs || !m_visualize_image_fs)
@@ -768,6 +1008,66 @@ private:
 
                 m_ocean_wireframe_program->uniform_block_binding("GlobalUniforms", 0);
             }
+
+            {
+                if (!m_grid_vs || !m_grid_tcs || !m_grid_tes || !m_ocean_lit_fs)
+                {
+                    DW_LOG_FATAL("Failed to create Shaders");
+                    return false;
+                }
+
+                // Create general shader program
+                dw::gl::Shader* shaders[] = { m_grid_vs.get(), m_grid_tcs.get(), m_grid_tes.get(), m_ocean_lit_fs.get() };
+                m_ocean_lit_program       = std::make_unique<dw::gl::Program>(4, shaders);
+
+                if (!m_ocean_lit_program)
+                {
+                    DW_LOG_FATAL("Failed to create Shader Program");
+                    return false;
+                }
+
+                m_ocean_lit_program->uniform_block_binding("GlobalUniforms", 0);
+            }
+
+            {
+                if (!m_sky_envmap_vs || !m_sky_envmap_fs)
+                {
+                    DW_LOG_FATAL("Failed to create Shaders");
+                    return false;
+                }
+
+                // Create general shader program
+                dw::gl::Shader* shaders[] = { m_sky_envmap_vs.get(), m_sky_envmap_fs.get() };
+                m_sky_envmap_program      = std::make_unique<dw::gl::Program>(2, shaders);
+
+                if (!m_sky_envmap_program)
+                {
+                    DW_LOG_FATAL("Failed to create Shader Program");
+                    return false;
+                }
+
+                m_sky_envmap_program->uniform_block_binding("GlobalUniforms", 0);
+            }
+
+            {
+                if (!m_cubemap_vs || !m_cubemap_fs)
+                {
+                    DW_LOG_FATAL("Failed to create Shaders");
+                    return false;
+                }
+
+                // Create general shader program
+                dw::gl::Shader* shaders[] = { m_cubemap_vs.get(), m_cubemap_fs.get() };
+                m_cubemap_program         = std::make_unique<dw::gl::Program>(2, shaders);
+
+                if (!m_cubemap_program)
+                {
+                    DW_LOG_FATAL("Failed to create Shader Program");
+                    return false;
+                }
+
+                m_cubemap_program->uniform_block_binding("GlobalUniforms", 0);
+            }
         }
 
         return true;
@@ -775,7 +1075,7 @@ private:
 
     // -----------------------------------------------------------------------------------------------------------------------------------
 
-    void create_ocean_textures()
+    void create_textures()
     {
         m_noise0           = std::unique_ptr<dw::gl::Texture2D>(dw::gl::Texture2D::create_from_files("noise/LDR_LLL1_0.png", false, false));
         m_noise1           = std::unique_ptr<dw::gl::Texture2D>(dw::gl::Texture2D::create_from_files("noise/LDR_LLL1_1.png", false, false));
@@ -792,6 +1092,7 @@ private:
         m_dy               = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_R32F, GL_RED, GL_FLOAT);
         m_dz               = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_R32F, GL_RED, GL_FLOAT);
         m_normal_map       = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RGBA32F, GL_RGBA, GL_FLOAT);
+        m_env_cubemap      = std::make_unique<dw::gl::TextureCube>(ENVIRONMENT_MAP_SIZE, ENVIRONMENT_MAP_SIZE, 1, 1, GL_RGB16F, GL_RGB, GL_HALF_FLOAT);
 
         m_noise0->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
         m_noise0->set_min_filter(GL_NEAREST);
@@ -836,6 +1137,339 @@ private:
         m_normal_map->set_wrapping(GL_REPEAT, GL_REPEAT, GL_REPEAT);
         m_normal_map->set_min_filter(GL_LINEAR);
         m_normal_map->set_mag_filter(GL_LINEAR);
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------------
+
+    void create_skybox_resources()
+    {
+        float vertices[] = {
+            // back face
+            -1.0f,
+            -1.0f,
+            -1.0f,
+            0.0f,
+            0.0f,
+            -1.0f,
+            0.0f,
+            0.0f, // bottom-left
+            1.0f,
+            1.0f,
+            -1.0f,
+            0.0f,
+            0.0f,
+            -1.0f,
+            1.0f,
+            1.0f, // top-right
+            1.0f,
+            -1.0f,
+            -1.0f,
+            0.0f,
+            0.0f,
+            -1.0f,
+            1.0f,
+            0.0f, // bottom-right
+            1.0f,
+            1.0f,
+            -1.0f,
+            0.0f,
+            0.0f,
+            -1.0f,
+            1.0f,
+            1.0f, // top-right
+            -1.0f,
+            -1.0f,
+            -1.0f,
+            0.0f,
+            0.0f,
+            -1.0f,
+            0.0f,
+            0.0f, // bottom-left
+            -1.0f,
+            1.0f,
+            -1.0f,
+            0.0f,
+            0.0f,
+            -1.0f,
+            0.0f,
+            1.0f, // top-left
+            // front face
+            -1.0f,
+            -1.0f,
+            1.0f,
+            0.0f,
+            0.0f,
+            1.0f,
+            0.0f,
+            0.0f, // bottom-left
+            1.0f,
+            -1.0f,
+            1.0f,
+            0.0f,
+            0.0f,
+            1.0f,
+            1.0f,
+            0.0f, // bottom-right
+            1.0f,
+            1.0f,
+            1.0f,
+            0.0f,
+            0.0f,
+            1.0f,
+            1.0f,
+            1.0f, // top-right
+            1.0f,
+            1.0f,
+            1.0f,
+            0.0f,
+            0.0f,
+            1.0f,
+            1.0f,
+            1.0f, // top-right
+            -1.0f,
+            1.0f,
+            1.0f,
+            0.0f,
+            0.0f,
+            1.0f,
+            0.0f,
+            1.0f, // top-left
+            -1.0f,
+            -1.0f,
+            1.0f,
+            0.0f,
+            0.0f,
+            1.0f,
+            0.0f,
+            0.0f, // bottom-left
+            // left face
+            -1.0f,
+            1.0f,
+            1.0f,
+            -1.0f,
+            0.0f,
+            0.0f,
+            1.0f,
+            0.0f, // top-right
+            -1.0f,
+            1.0f,
+            -1.0f,
+            -1.0f,
+            0.0f,
+            0.0f,
+            1.0f,
+            1.0f, // top-left
+            -1.0f,
+            -1.0f,
+            -1.0f,
+            -1.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            1.0f, // bottom-left
+            -1.0f,
+            -1.0f,
+            -1.0f,
+            -1.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            1.0f, // bottom-left
+            -1.0f,
+            -1.0f,
+            1.0f,
+            -1.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f, // bottom-right
+            -1.0f,
+            1.0f,
+            1.0f,
+            -1.0f,
+            0.0f,
+            0.0f,
+            1.0f,
+            0.0f, // top-right
+                  // right face
+            1.0f,
+            1.0f,
+            1.0f,
+            1.0f,
+            0.0f,
+            0.0f,
+            1.0f,
+            0.0f, // top-left
+            1.0f,
+            -1.0f,
+            -1.0f,
+            1.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            1.0f, // bottom-right
+            1.0f,
+            1.0f,
+            -1.0f,
+            1.0f,
+            0.0f,
+            0.0f,
+            1.0f,
+            1.0f, // top-right
+            1.0f,
+            -1.0f,
+            -1.0f,
+            1.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            1.0f, // bottom-right
+            1.0f,
+            1.0f,
+            1.0f,
+            1.0f,
+            0.0f,
+            0.0f,
+            1.0f,
+            0.0f, // top-left
+            1.0f,
+            -1.0f,
+            1.0f,
+            1.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f, // bottom-left
+            // bottom face
+            -1.0f,
+            -1.0f,
+            -1.0f,
+            0.0f,
+            -1.0f,
+            0.0f,
+            0.0f,
+            1.0f, // top-right
+            1.0f,
+            -1.0f,
+            -1.0f,
+            0.0f,
+            -1.0f,
+            0.0f,
+            1.0f,
+            1.0f, // top-left
+            1.0f,
+            -1.0f,
+            1.0f,
+            0.0f,
+            -1.0f,
+            0.0f,
+            1.0f,
+            0.0f, // bottom-left
+            1.0f,
+            -1.0f,
+            1.0f,
+            0.0f,
+            -1.0f,
+            0.0f,
+            1.0f,
+            0.0f, // bottom-left
+            -1.0f,
+            -1.0f,
+            1.0f,
+            0.0f,
+            -1.0f,
+            0.0f,
+            0.0f,
+            0.0f, // bottom-right
+            -1.0f,
+            -1.0f,
+            -1.0f,
+            0.0f,
+            -1.0f,
+            0.0f,
+            0.0f,
+            1.0f, // top-right
+            // top face
+            -1.0f,
+            1.0f,
+            -1.0f,
+            0.0f,
+            1.0f,
+            0.0f,
+            0.0f,
+            1.0f, // top-left
+            1.0f,
+            1.0f,
+            1.0f,
+            0.0f,
+            1.0f,
+            0.0f,
+            1.0f,
+            0.0f, // bottom-right
+            1.0f,
+            1.0f,
+            -1.0f,
+            0.0f,
+            1.0f,
+            0.0f,
+            1.0f,
+            1.0f, // top-right
+            1.0f,
+            1.0f,
+            1.0f,
+            0.0f,
+            1.0f,
+            0.0f,
+            1.0f,
+            0.0f, // bottom-right
+            -1.0f,
+            1.0f,
+            -1.0f,
+            0.0f,
+            1.0f,
+            0.0f,
+            0.0f,
+            1.0f, // top-left
+            -1.0f,
+            1.0f,
+            1.0f,
+            0.0f,
+            1.0f,
+            0.0f,
+            0.0f,
+            0.0f // bottom-left
+        };
+
+        m_cube_vbo = std::make_unique<dw::gl::VertexBuffer>(GL_STATIC_DRAW, sizeof(vertices), vertices);
+
+        if (!m_cube_vbo)
+            DW_LOG_ERROR("Failed to create Vertex Buffer");
+
+        // Declare vertex attributes.
+        dw::gl::VertexAttrib attribs[] = {
+            { 3, GL_FLOAT, false, 0 },
+            { 3, GL_FLOAT, false, (3 * sizeof(float)) },
+            { 2, GL_FLOAT, false, (6 * sizeof(float)) }
+        };
+
+        // Create vertex array.
+        m_cube_vao = std::make_unique<dw::gl::VertexArray>(m_cube_vbo.get(), nullptr, (8 * sizeof(float)), 3, attribs);
+
+        m_capture_projection = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+        m_capture_views      = {
+            glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 0.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f)),
+            glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(-1.0f, 0.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f)),
+            glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f)),
+            glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f)),
+            glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f), glm::vec3(0.0f, -1.0f, 0.0f)),
+            glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f), glm::vec3(0.0f, -1.0f, 0.0f))
+        };
+
+        for (int i = 0; i < 6; i++)
+        {
+            m_cubemap_fbos.push_back(std::make_unique<dw::gl::Framebuffer>());
+            m_cubemap_fbos[i]->attach_render_target(0, m_env_cubemap.get(), i, 0, 0, true, true);
+        }
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -925,6 +1559,10 @@ private:
     std::unique_ptr<dw::gl::Shader> m_grid_tes;
     std::unique_ptr<dw::gl::Shader> m_ocean_wireframe_fs;
     std::unique_ptr<dw::gl::Shader> m_ocean_lit_fs;
+    std::unique_ptr<dw::gl::Shader> m_sky_envmap_vs;
+    std::unique_ptr<dw::gl::Shader> m_sky_envmap_fs;
+    std::unique_ptr<dw::gl::Shader> m_cubemap_vs;
+    std::unique_ptr<dw::gl::Shader> m_cubemap_fs;
 
     std::unique_ptr<dw::gl::Program> m_visualize_image_program;
     std::unique_ptr<dw::gl::Program> m_tilde_h0_k_program;
@@ -936,22 +1574,25 @@ private:
     std::unique_ptr<dw::gl::Program> m_ocean_wireframe_program;
     std::unique_ptr<dw::gl::Program> m_ocean_wireframe_no_tess_program;
     std::unique_ptr<dw::gl::Program> m_ocean_lit_program;
+    std::unique_ptr<dw::gl::Program> m_sky_envmap_program;
+    std::unique_ptr<dw::gl::Program> m_cubemap_program;
 
-    std::unique_ptr<dw::gl::Texture2D> m_noise0;
-    std::unique_ptr<dw::gl::Texture2D> m_noise1;
-    std::unique_ptr<dw::gl::Texture2D> m_noise2;
-    std::unique_ptr<dw::gl::Texture2D> m_noise3;
-    std::unique_ptr<dw::gl::Texture2D> m_tilde_h0_k;
-    std::unique_ptr<dw::gl::Texture2D> m_tilde_h0_minus_k;
-    std::unique_ptr<dw::gl::Texture2D> m_tilde_h0_t_dy;
-    std::unique_ptr<dw::gl::Texture2D> m_tilde_h0_t_dx;
-    std::unique_ptr<dw::gl::Texture2D> m_tilde_h0_t_dz;
-    std::unique_ptr<dw::gl::Texture2D> m_twiddle_factors;
-    std::unique_ptr<dw::gl::Texture2D> m_ping_pong;
-    std::unique_ptr<dw::gl::Texture2D> m_dx;
-    std::unique_ptr<dw::gl::Texture2D> m_dy;
-    std::unique_ptr<dw::gl::Texture2D> m_dz;
-    std::unique_ptr<dw::gl::Texture2D> m_normal_map;
+    std::unique_ptr<dw::gl::Texture2D>   m_noise0;
+    std::unique_ptr<dw::gl::Texture2D>   m_noise1;
+    std::unique_ptr<dw::gl::Texture2D>   m_noise2;
+    std::unique_ptr<dw::gl::Texture2D>   m_noise3;
+    std::unique_ptr<dw::gl::Texture2D>   m_tilde_h0_k;
+    std::unique_ptr<dw::gl::Texture2D>   m_tilde_h0_minus_k;
+    std::unique_ptr<dw::gl::Texture2D>   m_tilde_h0_t_dy;
+    std::unique_ptr<dw::gl::Texture2D>   m_tilde_h0_t_dx;
+    std::unique_ptr<dw::gl::Texture2D>   m_tilde_h0_t_dz;
+    std::unique_ptr<dw::gl::Texture2D>   m_twiddle_factors;
+    std::unique_ptr<dw::gl::Texture2D>   m_ping_pong;
+    std::unique_ptr<dw::gl::Texture2D>   m_dx;
+    std::unique_ptr<dw::gl::Texture2D>   m_dy;
+    std::unique_ptr<dw::gl::Texture2D>   m_dz;
+    std::unique_ptr<dw::gl::Texture2D>   m_normal_map;
+    std::unique_ptr<dw::gl::TextureCube> m_env_cubemap;
 
     std::unique_ptr<dw::gl::ShaderStorageBuffer> m_bit_reversed_indices;
 
@@ -961,21 +1602,30 @@ private:
     uint32_t                              m_grid_num_vertices = 0;
     uint32_t                              m_grid_num_indices  = 0;
 
-    std::unique_ptr<dw::gl::UniformBuffer> m_global_ubo;
-    std::unique_ptr<dw::Camera>            m_main_camera;
+    std::unique_ptr<dw::gl::UniformBuffer>            m_global_ubo;
+    std::unique_ptr<dw::Camera>                       m_main_camera;
+    SkyModel                                          m_sky_model;
+    std::vector<glm::mat4>                            m_capture_views;
+    glm::mat4                                         m_capture_projection;
+    std::vector<std::unique_ptr<dw::gl::Framebuffer>> m_cubemap_fbos;
+    std::unique_ptr<dw::gl::VertexBuffer>             m_cube_vbo;
+    std::unique_ptr<dw::gl::VertexArray>              m_cube_vao;
 
     GlobalUniforms m_global_uniforms;
 
     // Camera controls.
-    bool  m_mouse_look         = false;
-    float m_heading_speed      = 0.0f;
-    float m_sideways_speed     = 0.0f;
-    float m_camera_sensitivity = 0.05f;
-    float m_camera_speed       = 0.001f;
+    bool  m_visualize_displacement_map = false;
+    bool  m_debug_gui                  = true;
+    bool  m_mouse_look                 = false;
+    float m_heading_speed              = 0.0f;
+    float m_sideways_speed             = 0.0f;
+    float m_camera_sensitivity         = 0.05f;
+    float m_camera_speed               = 0.001f;
 
     // Ocean
-    float m_displacement_scale = 0.5f;
-    float m_choppiness         = 0.75f;
+    float     m_displacement_scale = 0.5f;
+    float     m_choppiness         = 0.75f;
+    glm::vec3 m_sea_color          = glm::vec3(0.0f, 0.169668034f, 0.439894319f);
 
     // Camera orientation.
     float m_camera_x;

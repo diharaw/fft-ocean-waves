@@ -18,7 +18,7 @@ out vec2 TCS_IN_TexCoord;
 
 void main()
 {
-    TCS_IN_FragPos = VS_IN_Position;
+    TCS_IN_FragPos  = VS_IN_Position;
     TCS_IN_TexCoord = VS_IN_Texcoord;
 }
 
