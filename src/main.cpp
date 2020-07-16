@@ -16,6 +16,8 @@
 #define DEBUG_CAMERA_FAR_PLANE 10000.0f
 #define DISPLACEMENT_MAP_SIZE 256
 #define COMPUTE_LOCAL_WORK_GROUP_SIZE 32
+#define GRID_SIZE 1024
+#define GRID_UV_SCALE 64
 
 struct GlobalUniforms
 {
@@ -60,6 +62,12 @@ unsigned long reverse_bits(unsigned long codeword, unsigned char maxLength)
     return codeword;
 }
 
+struct GridVertex
+{
+    glm::vec3 position;
+    glm::vec2 texcoord;
+};
+
 class FFTOceanWaves : public dw::Application
 {
 protected:
@@ -78,9 +86,13 @@ protected:
 
         // Create camera.
         create_camera();
+
+        // FFT precomputations
         tilde_h0_k();
         generate_bit_reversed_indices();
-        
+        generate_twiddle_factors();
+        generate_grid(GRID_SIZE, GRID_UV_SCALE);
+
         return true;
     }
 
@@ -92,17 +104,21 @@ protected:
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+        debug_gui();
+
         // Update camera.
         update_camera();
 
         update_uniforms();
 
-        m_debug_draw.aabb(glm::vec3(10.0f), glm::vec3(-10.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        generate_twiddle_factors();
         tilde_h0_t();
-        render_visualization_quad(m_tilde_h0_t_dy);
+        butterfly_fft(m_tilde_h0_t_dy, m_dy);
+        butterfly_fft(m_tilde_h0_t_dx, m_dx);
+        butterfly_fft(m_tilde_h0_t_dz, m_dz);
+        generate_normal_map();
 
-        m_debug_draw.render(nullptr, m_width, m_height, m_global_uniforms.view_proj, m_main_camera->m_position);
+        render_grid_wireframe_tessellated();
+        render_visualization_quad(m_dy);
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -110,7 +126,7 @@ protected:
     void window_resized(int width, int height) override
     {
         // Override window resized method to update camera projection.
-        m_main_camera->update_projection(60.0f, 1.0f, CAMERA_FAR_PLANE, float(m_width) / float(m_height));
+        m_main_camera->update_projection(60.0f, 0.1f, CAMERA_FAR_PLANE, float(m_width) / float(m_height));
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -176,13 +192,13 @@ protected:
     {
         dw::AppSettings settings;
 
-        settings.resizable    = true;
-        settings.maximized    = false;
-        settings.refresh_rate = 60;
-        settings.major_ver    = 4;
-        settings.width        = 1920;
-        settings.height       = 1080;
-        settings.title        = "FFT Ocean Waves (c) 2020 Dihara Wijetunga";
+        settings.resizable             = true;
+        settings.maximized             = false;
+        settings.refresh_rate          = 60;
+        settings.major_ver             = 4;
+        settings.width                 = 1920;
+        settings.height                = 1080;
+        settings.title                 = "FFT Ocean Waves (c) 2020 Dihara Wijetunga";
         settings.enable_debug_callback = false;
 
         return settings;
@@ -191,6 +207,16 @@ protected:
     // -----------------------------------------------------------------------------------------------------------------------------------
 
 private:
+
+    // -----------------------------------------------------------------------------------------------------------------------------------
+
+    void debug_gui()
+    {
+        ImGui::InputFloat("Displacement Scale", &m_displacement_scale);
+        ImGui::InputFloat("Choppiness", &m_choppiness);
+        ImGui::InputFloat("Wind Speed (m/s)", &m_wind_speed);
+        ImGui::InputFloat("Amplitude", &m_amplitude);
+    }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
 
@@ -219,10 +245,67 @@ private:
 
         // Render fullscreen triangle
         glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------------
+
+    void render_grid_wireframe()
+    {
+        glViewport(0, 0, m_width, m_height);
 
         glEnable(GL_DEPTH_TEST);
         glEnable(GL_CULL_FACE);
-        glEnable(GL_BLEND);
+        glDisable(GL_BLEND);
+
+        m_ocean_wireframe_no_tess_program->use();
+        m_global_ubo->bind_base(0);
+
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+
+        m_grid_vao->bind();
+
+        glDrawElements(GL_TRIANGLES, m_grid_num_indices, GL_UNSIGNED_INT, 0);
+
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------------
+
+    void render_grid_wireframe_tessellated()
+    {
+        glViewport(0, 0, m_width, m_height);
+
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+
+        m_ocean_wireframe_program->use();
+        m_global_ubo->bind_base(0);
+
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+
+        m_ocean_wireframe_program->set_uniform("u_CameraPos", m_main_camera->m_position);
+        m_ocean_wireframe_program->set_uniform("u_DisplacementScale", m_displacement_scale);
+        m_ocean_wireframe_program->set_uniform("u_Choppiness", m_choppiness);
+
+        if (m_ocean_wireframe_program->set_uniform("s_Dy", 0))
+            m_dy->bind(0);
+
+        if (m_ocean_wireframe_program->set_uniform("s_Dx", 1))
+            m_dx->bind(1);
+
+        if (m_ocean_wireframe_program->set_uniform("s_Dz", 2))
+            m_dz->bind(2);
+
+        if (m_ocean_wireframe_program->set_uniform("s_NormalMap", 3))
+            m_normal_map->bind(3);
+
+        m_grid_vao->bind();
+
+        glPatchParameteri(GL_PATCH_VERTICES, 3);
+        glDrawElements(GL_PATCHES, m_grid_num_indices, GL_UNSIGNED_INT, 0);
+
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -255,6 +338,8 @@ private:
         uint32_t num_groups = m_N / COMPUTE_LOCAL_WORK_GROUP_SIZE;
 
         glDispatchCompute(num_groups, num_groups, 1);
+
+        glFinish();
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -278,6 +363,107 @@ private:
         uint32_t num_groups = m_N / COMPUTE_LOCAL_WORK_GROUP_SIZE;
 
         glDispatchCompute(num_groups, num_groups, 1);
+
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------------
+
+    void butterfly_fft(std::unique_ptr<dw::gl::Texture2D>& tilde_h0_t, std::unique_ptr<dw::gl::Texture2D>& dst)
+    {
+        m_butterfly_program->use();
+
+        m_twiddle_factors->bind_image(0, 0, 0, GL_READ_ONLY, m_twiddle_factors->internal_format());
+        tilde_h0_t->bind_image(1, 0, 0, GL_READ_WRITE, tilde_h0_t->internal_format());
+        m_ping_pong->bind_image(2, 0, 0, GL_READ_WRITE, m_ping_pong->internal_format());
+
+        int log_2_n  = int(log(m_N) / log(2));
+        int pingpong = 0;
+
+        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "1D FFT Horizontal");
+
+        // 1D FFT horizontal
+        for (int i = 0; i < log_2_n; i++)
+        {
+            m_butterfly_program->set_uniform("u_PingPong", pingpong);
+            m_butterfly_program->set_uniform("u_Direction", 0);
+            m_butterfly_program->set_uniform("u_Stage", i);
+
+            uint32_t num_groups = m_N / COMPUTE_LOCAL_WORK_GROUP_SIZE;
+
+            glDispatchCompute(num_groups, num_groups, 1);
+
+            glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+            pingpong++;
+            pingpong %= 2;
+        }
+
+        glPopDebugGroup();
+
+        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "1D FFT Vertical");
+
+        // 1D FFT vertical
+        for (int i = 0; i < log_2_n; i++)
+        {
+            m_butterfly_program->set_uniform("u_PingPong", pingpong);
+            m_butterfly_program->set_uniform("u_Direction", 1);
+            m_butterfly_program->set_uniform("u_Stage", i);
+
+            uint32_t num_groups = m_N / COMPUTE_LOCAL_WORK_GROUP_SIZE;
+
+            glDispatchCompute(num_groups, num_groups, 1);
+
+            glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+            pingpong++;
+            pingpong %= 2;
+        }
+
+        glPopDebugGroup();
+
+        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "FFT Inversion");
+
+        m_inversion_program->use();
+
+        m_inversion_program->set_uniform("u_PingPong", pingpong);
+        m_inversion_program->set_uniform("u_N", m_N);
+
+        dst->bind_image(0, 0, 0, GL_WRITE_ONLY, dst->internal_format());
+        tilde_h0_t->bind_image(1, 0, 0, GL_READ_ONLY, tilde_h0_t->internal_format());
+        m_ping_pong->bind_image(2, 0, 0, GL_READ_ONLY, m_ping_pong->internal_format());
+
+        uint32_t num_groups = m_N / COMPUTE_LOCAL_WORK_GROUP_SIZE;
+
+        glDispatchCompute(num_groups, num_groups, 1);
+
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+        glPopDebugGroup();
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------------
+
+    void generate_normal_map()
+    {
+        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Generate Normal Map");
+
+        m_normal_map_program->use();
+
+        m_normal_map->bind_image(0, 0, 0, GL_WRITE_ONLY, m_normal_map->internal_format());
+
+        if (m_normal_map_program->set_uniform("s_HeightMap", 0))
+            m_dy->bind(0);
+
+        m_normal_map_program->set_uniform("u_N", m_N);
+
+        uint32_t num_groups = m_N / COMPUTE_LOCAL_WORK_GROUP_SIZE;
+
+        glDispatchCompute(num_groups, num_groups, 1);
+
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+        glPopDebugGroup();
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -286,16 +472,20 @@ private:
     {
         m_twiddle_factors_program->use();
 
-        uint32_t log_2_n = int(log(m_N)/log(2));
+        uint32_t log_2_n    = int(log(m_N) / log(2));
         uint32_t num_groups = m_N / COMPUTE_LOCAL_WORK_GROUP_SIZE;
 
         m_twiddle_factors->bind_image(0, 0, 0, GL_WRITE_ONLY, m_twiddle_factors->internal_format());
 
         m_bit_reversed_indices->bind_base(0);
 
-        m_twiddle_factors_program->set_uniform("m_N", m_N);
+        m_twiddle_factors_program->set_uniform("u_N", m_N);
+        m_twiddle_factors_program->set_uniform("u_DisplacementScale", m_N);
+        m_twiddle_factors_program->set_uniform("u_Choppiness", m_N);
 
         glDispatchCompute(log_2_n, num_groups, 1);
+
+        glFinish();
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -305,12 +495,92 @@ private:
         std::vector<int32_t> indices;
         indices.resize(m_N);
 
-        int32_t num_bits = int(log(m_N)/log(2));
+        int32_t num_bits = int(log(m_N) / log(2));
 
         for (int i = 0; i < m_N; i++)
             indices[i] = reverse_bits(i, num_bits);
 
         m_bit_reversed_indices = std::unique_ptr<dw::gl::ShaderStorageBuffer>(new dw::gl::ShaderStorageBuffer(GL_STATIC_DRAW, sizeof(int32_t) * m_N, indices.data()));
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------------
+
+    void generate_grid(const int32_t& num_squares_per_side, const float& texcoord_scale)
+    {
+        std::vector<GridVertex> vertices;
+        std::vector<uint32_t>   indices;
+        const int32_t           n       = num_squares_per_side;
+        const int32_t           half_n  = n / 2;
+        const int32_t           n_verts = n + 1;
+
+        vertices.reserve(n_verts * n_verts);
+        indices.reserve(n_verts * n_verts * 3);
+
+        // Generate vertices
+        for (int32_t y = -half_n; y <= half_n; y++)
+        {
+            for (int32_t x = -half_n; x <= half_n; x++)
+            {
+                GridVertex vert;
+
+                vert.position = glm::vec3(float(x), 0.0f, float(y));
+
+                float u = float(x + half_n) / float(n);
+                float v = float(y + half_n) / float(n);
+
+                vert.texcoord = glm::vec2(u * texcoord_scale, v * texcoord_scale);
+
+                vertices.push_back(vert);
+            }
+        }
+
+        // Generate indices
+        for (int32_t y = 0; y < n; y++)
+        {
+            for (int32_t x = 0; x < n; x++)
+            {
+                uint32_t i0 = (n_verts * y) + x;
+                uint32_t i1 = (n_verts * (y + 1)) + x;
+                uint32_t i2 = i0 + 1;
+
+                indices.push_back(i0);
+                indices.push_back(i1);
+                indices.push_back(i2);
+
+                uint32_t i3 = i2;
+                uint32_t i4 = i1;
+                uint32_t i5 = i1 + 1;
+
+                indices.push_back(i3);
+                indices.push_back(i4);
+                indices.push_back(i5);
+            }
+        }
+
+        m_grid_num_vertices = vertices.size();
+        m_grid_num_indices  = indices.size();
+
+        // Create vertex buffer.
+        m_grid_vbo = std::make_unique<dw::gl::VertexBuffer>(GL_STATIC_DRAW, sizeof(GridVertex) * vertices.size(), vertices.data());
+
+        if (!m_grid_vbo)
+            DW_LOG_ERROR("Failed to create Vertex Buffer");
+
+        // Create index buffer.
+        m_grid_ibo = std::make_unique<dw::gl::IndexBuffer>(GL_STATIC_DRAW, sizeof(uint32_t) * indices.size(), indices.data());
+
+        if (!m_grid_ibo)
+            DW_LOG_ERROR("Failed to create Index Buffer");
+
+        // Declare vertex attributes.
+        dw::gl::VertexAttrib attribs[] = { { 3, GL_FLOAT, false, 0 },
+                                           { 2, GL_FLOAT, false, offsetof(GridVertex, texcoord) } };
+
+        // Create vertex array.
+        m_grid_vao = std::make_unique<dw::gl::VertexArray>(m_grid_vbo.get(), m_grid_ibo.get(), sizeof(GridVertex), 2, attribs);
+
+        if (!m_grid_vao)
+            DW_LOG_ERROR("Failed to create Vertex Array");
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -323,7 +593,15 @@ private:
             m_visualize_image_fs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/visualize_image_fs.glsl"));
             m_tilde_h0_k_cs      = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/tilde_h0_k_cs.glsl"));
             m_tilde_h0_t_cs      = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/tilde_h0_t_cs.glsl"));
-            m_twiddle_factors_cs      = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/twiddle_factors_cs.glsl"));
+            m_twiddle_factors_cs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/twiddle_factors_cs.glsl"));
+            m_butterfly_cs       = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/butterfly_cs.glsl"));
+            m_inversion_cs       = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/inversion_cs.glsl"));
+            m_normal_map_cs      = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/normal_map_cs.glsl"));
+            m_grid_vs            = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_VERTEX_SHADER, "shader/grid_vs.glsl"));
+            m_grid_non_tess_vs   = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_VERTEX_SHADER, "shader/grid_non_tess_vs.glsl"));
+            m_grid_tcs           = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_TESS_CONTROL_SHADER, "shader/grid_tcs.glsl"));
+            m_grid_tes           = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_TESS_EVALUATION_SHADER, "shader/grid_tes.glsl"));
+            m_ocean_wireframe_fs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/wireframe_fs.glsl"));
 
             {
                 if (!m_triangle_vs || !m_visualize_image_fs)
@@ -341,8 +619,6 @@ private:
                     DW_LOG_FATAL("Failed to create Shader Program");
                     return false;
                 }
-
-                m_visualize_image_program->uniform_block_binding("GlobalUniforms", 0);
             }
 
             {
@@ -390,13 +666,107 @@ private:
 
                 // Create general shader program
                 dw::gl::Shader* shaders[] = { m_twiddle_factors_cs.get() };
-                m_twiddle_factors_program      = std::make_unique<dw::gl::Program>(1, shaders);
+                m_twiddle_factors_program = std::make_unique<dw::gl::Program>(1, shaders);
 
                 if (!m_twiddle_factors_program)
                 {
                     DW_LOG_FATAL("Failed to create Shader Program");
                     return false;
                 }
+            }
+
+            {
+                if (!m_butterfly_cs)
+                {
+                    DW_LOG_FATAL("Failed to create Shaders");
+                    return false;
+                }
+
+                // Create general shader program
+                dw::gl::Shader* shaders[] = { m_butterfly_cs.get() };
+                m_butterfly_program       = std::make_unique<dw::gl::Program>(1, shaders);
+
+                if (!m_butterfly_program)
+                {
+                    DW_LOG_FATAL("Failed to create Shader Program");
+                    return false;
+                }
+            }
+
+            {
+                if (!m_inversion_cs)
+                {
+                    DW_LOG_FATAL("Failed to create Shaders");
+                    return false;
+                }
+
+                // Create general shader program
+                dw::gl::Shader* shaders[] = { m_inversion_cs.get() };
+                m_inversion_program       = std::make_unique<dw::gl::Program>(1, shaders);
+
+                if (!m_inversion_program)
+                {
+                    DW_LOG_FATAL("Failed to create Shader Program");
+                    return false;
+                }
+            }
+
+            {
+                if (!m_normal_map_cs)
+                {
+                    DW_LOG_FATAL("Failed to create Shaders");
+                    return false;
+                }
+
+                // Create general shader program
+                dw::gl::Shader* shaders[] = { m_normal_map_cs.get() };
+                m_normal_map_program      = std::make_unique<dw::gl::Program>(1, shaders);
+
+                if (!m_normal_map_program)
+                {
+                    DW_LOG_FATAL("Failed to create Shader Program");
+                    return false;
+                }
+            }
+
+            {
+                if (!m_grid_non_tess_vs || !m_ocean_wireframe_fs)
+                {
+                    DW_LOG_FATAL("Failed to create Shaders");
+                    return false;
+                }
+
+                // Create general shader program
+                dw::gl::Shader* shaders[]         = { m_grid_non_tess_vs.get(), m_ocean_wireframe_fs.get() };
+                m_ocean_wireframe_no_tess_program = std::make_unique<dw::gl::Program>(2, shaders);
+
+                if (!m_ocean_wireframe_no_tess_program)
+                {
+                    DW_LOG_FATAL("Failed to create Shader Program");
+                    return false;
+                }
+
+                m_ocean_wireframe_no_tess_program->uniform_block_binding("GlobalUniforms", 0);
+            }
+
+            {
+                if (!m_grid_vs || !m_grid_tcs || !m_grid_tes || !m_ocean_wireframe_fs)
+                {
+                    DW_LOG_FATAL("Failed to create Shaders");
+                    return false;
+                }
+
+                // Create general shader program
+                dw::gl::Shader* shaders[] = { m_grid_vs.get(), m_grid_tcs.get(), m_grid_tes.get(), m_ocean_wireframe_fs.get() };
+                m_ocean_wireframe_program = std::make_unique<dw::gl::Program>(4, shaders);
+
+                if (!m_ocean_wireframe_program)
+                {
+                    DW_LOG_FATAL("Failed to create Shader Program");
+                    return false;
+                }
+
+                m_ocean_wireframe_program->uniform_block_binding("GlobalUniforms", 0);
             }
         }
 
@@ -413,10 +783,15 @@ private:
         m_noise3           = std::unique_ptr<dw::gl::Texture2D>(dw::gl::Texture2D::create_from_files("noise/LDR_LLL1_3.png", false, false));
         m_tilde_h0_k       = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
         m_tilde_h0_minus_k = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
-        m_tilde_h0_t_dx    = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
-        m_tilde_h0_t_dy    = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
-        m_tilde_h0_t_dz    = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RG32F, GL_RG, GL_FLOAT);
+        m_tilde_h0_t_dx    = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RGBA32F, GL_RGBA, GL_FLOAT);
+        m_tilde_h0_t_dy    = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RGBA32F, GL_RGBA, GL_FLOAT);
+        m_tilde_h0_t_dz    = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RGBA32F, GL_RGBA, GL_FLOAT);
         m_twiddle_factors  = std::make_unique<dw::gl::Texture2D>(log(m_N) / log(2), m_N, 1, 1, 1, GL_RGBA32F, GL_RGBA, GL_FLOAT);
+        m_ping_pong        = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RGBA32F, GL_RGBA, GL_FLOAT);
+        m_dx               = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_R32F, GL_RED, GL_FLOAT);
+        m_dy               = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_R32F, GL_RED, GL_FLOAT);
+        m_dz               = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_R32F, GL_RED, GL_FLOAT);
+        m_normal_map       = std::make_unique<dw::gl::Texture2D>(m_N, m_N, 1, 1, 1, GL_RGBA32F, GL_RGBA, GL_FLOAT);
 
         m_noise0->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
         m_noise0->set_min_filter(GL_NEAREST);
@@ -442,21 +817,25 @@ private:
         m_tilde_h0_minus_k->set_min_filter(GL_NEAREST);
         m_tilde_h0_minus_k->set_mag_filter(GL_NEAREST);
 
-        m_tilde_h0_t_dx->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
-        m_tilde_h0_t_dx->set_min_filter(GL_NEAREST);
-        m_tilde_h0_t_dx->set_mag_filter(GL_NEAREST);
-
-        m_tilde_h0_t_dy->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
-        m_tilde_h0_t_dy->set_min_filter(GL_NEAREST);
-        m_tilde_h0_t_dy->set_mag_filter(GL_NEAREST);
-
-        m_tilde_h0_t_dz->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
-        m_tilde_h0_t_dz->set_min_filter(GL_NEAREST);
-        m_tilde_h0_t_dz->set_mag_filter(GL_NEAREST);
-
         m_twiddle_factors->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
         m_twiddle_factors->set_min_filter(GL_NEAREST);
         m_twiddle_factors->set_mag_filter(GL_NEAREST);
+
+        m_tilde_h0_t_dx->set_wrapping(GL_REPEAT, GL_REPEAT, GL_REPEAT);
+        m_tilde_h0_t_dx->set_min_filter(GL_LINEAR);
+        m_tilde_h0_t_dx->set_mag_filter(GL_LINEAR);
+
+        m_tilde_h0_t_dy->set_wrapping(GL_REPEAT, GL_REPEAT, GL_REPEAT);
+        m_tilde_h0_t_dy->set_min_filter(GL_LINEAR);
+        m_tilde_h0_t_dy->set_mag_filter(GL_LINEAR);
+
+        m_tilde_h0_t_dz->set_wrapping(GL_REPEAT, GL_REPEAT, GL_REPEAT);
+        m_tilde_h0_t_dz->set_min_filter(GL_LINEAR);
+        m_tilde_h0_t_dz->set_mag_filter(GL_LINEAR);
+
+        m_normal_map->set_wrapping(GL_REPEAT, GL_REPEAT, GL_REPEAT);
+        m_normal_map->set_min_filter(GL_LINEAR);
+        m_normal_map->set_mag_filter(GL_LINEAR);
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -473,7 +852,7 @@ private:
 
     void create_camera()
     {
-        m_main_camera = std::make_unique<dw::Camera>(60.0f, 1.0f, CAMERA_FAR_PLANE, float(m_width) / float(m_height), glm::vec3(50.0f, 20.0f, 0.0f), glm::vec3(-1.0f, 0.0, 0.0f));
+        m_main_camera = std::make_unique<dw::Camera>(60.0f, 0.1f, CAMERA_FAR_PLANE, float(m_width) / float(m_height), glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(-1.0f, 0.0, 0.0f));
         m_main_camera->set_rotatation_delta(glm::vec3(0.0f, -90.0f, 0.0f));
         m_main_camera->update();
     }
@@ -537,11 +916,26 @@ private:
     std::unique_ptr<dw::gl::Shader> m_tilde_h0_k_cs;
     std::unique_ptr<dw::gl::Shader> m_tilde_h0_t_cs;
     std::unique_ptr<dw::gl::Shader> m_twiddle_factors_cs;
+    std::unique_ptr<dw::gl::Shader> m_butterfly_cs;
+    std::unique_ptr<dw::gl::Shader> m_inversion_cs;
+    std::unique_ptr<dw::gl::Shader> m_normal_map_cs;
+    std::unique_ptr<dw::gl::Shader> m_grid_vs;
+    std::unique_ptr<dw::gl::Shader> m_grid_non_tess_vs;
+    std::unique_ptr<dw::gl::Shader> m_grid_tcs;
+    std::unique_ptr<dw::gl::Shader> m_grid_tes;
+    std::unique_ptr<dw::gl::Shader> m_ocean_wireframe_fs;
+    std::unique_ptr<dw::gl::Shader> m_ocean_lit_fs;
 
     std::unique_ptr<dw::gl::Program> m_visualize_image_program;
     std::unique_ptr<dw::gl::Program> m_tilde_h0_k_program;
     std::unique_ptr<dw::gl::Program> m_tilde_h0_t_program;
     std::unique_ptr<dw::gl::Program> m_twiddle_factors_program;
+    std::unique_ptr<dw::gl::Program> m_butterfly_program;
+    std::unique_ptr<dw::gl::Program> m_inversion_program;
+    std::unique_ptr<dw::gl::Program> m_normal_map_program;
+    std::unique_ptr<dw::gl::Program> m_ocean_wireframe_program;
+    std::unique_ptr<dw::gl::Program> m_ocean_wireframe_no_tess_program;
+    std::unique_ptr<dw::gl::Program> m_ocean_lit_program;
 
     std::unique_ptr<dw::gl::Texture2D> m_noise0;
     std::unique_ptr<dw::gl::Texture2D> m_noise1;
@@ -553,8 +947,19 @@ private:
     std::unique_ptr<dw::gl::Texture2D> m_tilde_h0_t_dx;
     std::unique_ptr<dw::gl::Texture2D> m_tilde_h0_t_dz;
     std::unique_ptr<dw::gl::Texture2D> m_twiddle_factors;
+    std::unique_ptr<dw::gl::Texture2D> m_ping_pong;
+    std::unique_ptr<dw::gl::Texture2D> m_dx;
+    std::unique_ptr<dw::gl::Texture2D> m_dy;
+    std::unique_ptr<dw::gl::Texture2D> m_dz;
+    std::unique_ptr<dw::gl::Texture2D> m_normal_map;
 
     std::unique_ptr<dw::gl::ShaderStorageBuffer> m_bit_reversed_indices;
+
+    std::unique_ptr<dw::gl::VertexBuffer> m_grid_vbo;
+    std::unique_ptr<dw::gl::IndexBuffer>  m_grid_ibo;
+    std::unique_ptr<dw::gl::VertexArray>  m_grid_vao;
+    uint32_t                              m_grid_num_vertices = 0;
+    uint32_t                              m_grid_num_indices  = 0;
 
     std::unique_ptr<dw::gl::UniformBuffer> m_global_ubo;
     std::unique_ptr<dw::Camera>            m_main_camera;
@@ -566,12 +971,15 @@ private:
     float m_heading_speed      = 0.0f;
     float m_sideways_speed     = 0.0f;
     float m_camera_sensitivity = 0.05f;
-    float m_camera_speed       = 0.05f;
+    float m_camera_speed       = 0.001f;
+
+    // Ocean
+    float m_displacement_scale = 0.5f;
+    float m_choppiness         = 0.75f;
 
     // Camera orientation.
     float m_camera_x;
     float m_camera_y;
-    float m_light_size = 0.07f;
 
     // FFT options
     float     m_wind_speed         = 80.0f;
