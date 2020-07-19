@@ -243,7 +243,11 @@ protected:
         butterfly_fft(m_tilde_h0_t_dz, m_dz);
         generate_normal_map();
 
-        render_grid_lit_tessellated();
+        if (m_visualize_wireframe)
+            render_grid_wireframe_tessellated();
+        else
+            render_grid_lit_tessellated();
+        
         render_skybox();
 
         if (m_visualize_displacement_map)
@@ -349,6 +353,7 @@ private:
         ImGui::InputFloat("Amplitude", &m_amplitude);
         ImGui::SliderAngle("Sun Angle", &m_sky_model.m_sun_angle, 0.0f, -180.0f);
         ImGui::ColorPicker3("Sea Color", &m_sea_color[0]);
+        ImGui::Checkbox("Visualize Wireframe", &m_visualize_wireframe);
         ImGui::Checkbox("Visualize Displacement Map", &m_visualize_displacement_map);
     }
 
@@ -1623,6 +1628,7 @@ private:
     float m_camera_speed               = 0.001f;
 
     // Ocean
+    bool      m_visualize_wireframe = false;
     float     m_displacement_scale = 0.5f;
     float     m_choppiness         = 0.75f;
     glm::vec3 m_sea_color          = glm::vec3(0.0f, 0.169668034f, 0.439894319f);
