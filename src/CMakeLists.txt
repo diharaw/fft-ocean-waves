@@ -21,6 +21,8 @@ target_link_libraries(FFTOceanWaves dwSampleFramework)
 
 if (NOT APPLE)
     add_custom_command(TARGET FFTOceanWaves POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/src/shader $<TARGET_FILE_DIR:FFTOceanWaves>/shader)
+    add_custom_command(TARGET FFTOceanWaves POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/data/noise $<TARGET_FILE_DIR:FFTOceanWaves>/noise)
+    add_custom_command(TARGET FFTOceanWaves POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/data/texture $<TARGET_FILE_DIR:FFTOceanWaves>/texture)
 endif()
 
 if(CLANG_FORMAT_EXE)
